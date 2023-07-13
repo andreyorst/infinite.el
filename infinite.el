@@ -5,7 +5,7 @@
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: windowing
 ;; Prefix: infinite
-;; Version: 0.0.1
+;; Version: 0.0.2
 ;;
 ;; This program is free software: you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
@@ -183,6 +183,7 @@ Don't call manually, instead use `infinite-start'."
 
 (define-key infinite-mode-map [down-mouse-1] #'infinite--track-mouse)
 
+;;;###autoload
 (defun infinite-start ()
   "Create infinite space that can be panned with mouse and spawn windows on it."
   (interactive)
