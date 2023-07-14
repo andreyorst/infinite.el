@@ -5,7 +5,7 @@
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: frames mouse convenience
 ;; Prefix: infinite
-;; Version: 0.0.3
+;; Version: 0.0.4
 ;;
 ;; This program is free software: you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
@@ -38,91 +38,67 @@
   :package-version '(infinite "0.0.3"))
 
 (defvar infinite--base-frame nil)
-(defvar infinite--frames nil)
+(defvar infinite--last-frame nil)
 (defvar infinite--default-pixel-width 560)
 (defvar infinite--default-pixel-height 720)
 
 (defvar infinite--header-line-format
-  '(:eval (concat
-           " "
-           (propertize
-            "🆇"
-            'face '(:foreground "red")
-            'pointer 'hand
-            'help-echo "close window"
-            'local-map (let ((map (make-sparse-keymap)))
-                         (define-key map [header-line mouse-1] 'infinite-delete-frame)
-                         map))
-           " "
-           (propertize
-            "🅼"
-            'face (if (frame-parameter (selected-frame) 'infinite-maximized)
-                      '(:foreground "blue")
-                    '(:foreground "green"))
-            'pointer 'hand
-            'help-echo (if (frame-parameter (selected-frame) 'infinite-maximized)
-                           "unmaximize window"
-                         "maximize window")
-            'local-map (let ((map (make-sparse-keymap)))
-                         (define-key map [header-line mouse-1]
-                                     (if (frame-parameter (selected-frame) 'infinite-maximized)
-                                         #'infinite-unmaximize-frame
-                                       #'infinite-maximize-frame))
-                         map))
-           " %b")))
+  (concat (propertize " " 'face '(:background "gray50"))
+          (propertize
+           "x"
+           'face '(:foreground "red" :background "gray50")
+           'pointer 'hand
+           'help-echo "close window"
+           'local-map (let ((map (make-sparse-keymap)))
+                        (define-key map [header-line mouse-1] 'infinite-close-frame)
+                        map))
+          (propertize " " 'face '(:background "gray50"))
+          (propertize
+           "^"
+           'face '(:foreground "green" :background "gray50")
+           'pointer 'hand
+           'help-echo "maximize window"
+           'local-map (let ((map (make-sparse-keymap)))
+                        (define-key map [header-line mouse-1] #'infinite-maximize-frame)
+                        map))
+          (propertize " " 'face '(:background "gray50"))
+          " %b"))
 
-(defun infinite--this-window (&rest _)
-  (selected-window))
+(defun infinite-frame-p (frame)
+  "Check if the FRAME is a window spawned by infinite."
+  (frame-parameter frame 'infinite-frame))
 
 (defun infinite-maximize-frame (event)
+  "Maximize the frame based on the EVENT."
   (interactive "e")
   (let* ((window (posn-window (event-start event)))
          (frame (window-frame window))
-         (frame-width (frame-pixel-width frame))
-         (frame-height (frame-pixel-height frame))
-         (pos (frame-position frame))
-         (parent (frame-parent frame))
-         (parent-window (frame-root-window parent))
-         (parent-window-width (window-pixel-width parent-window))
-         (parent-window-height (window-pixel-height parent-window)))
-    (dolist (f infinite--frames)
-      (unless (eq f frame)
+         (parent-window (frame-root-window (frame-parent frame))))
+    (setq infinite--last-frame (window-frame window))
+    (dolist (f (frame-list))
+      (when (infinite-frame-p f)
         (make-frame-invisible f t)))
-    (set-window-parameter
-     window
-     'split-window
-     #'infinite--this-window)
-    (modify-frame-parameters
-     frame
-     `((infinite-maximized . t)
-       (infinite-previous-position . ,pos)
-       (infinite-previous-size . ,(cons frame-width frame-height))
-       (drag-with-header-line . nil)
-       (left . 0)
-       (top . 0)))
-    (set-frame-size frame parent-window-width parent-window-height t)))
+    (select-window parent-window)
+    (switch-to-buffer (window-buffer window))
+    (infinite-maximized 1)))
 
-(defun infinite-unmaximize-frame (event)
+(defun infinite-unmaximize-frame (_)
+  "Unmaximize the current buffer into a frame."
   (interactive "e")
-  (let* ((window (posn-window (event-start event)))
-         (frame (window-frame window))
-         (pos (frame-parameter frame 'infinite-previous-position))
-         (size (frame-parameter frame 'infinite-previous-size)))
-    (modify-frame-parameters
-     frame
-     `((infinite-maximized . nil)
-       (infinite-previous-position . nil)
-       (drag-with-header-line . t)
-       (left . ,(car pos))
-       (top . ,(cdr pos))))
-    (set-window-parameter
-     window
-     'split-window
-     #'infinite--open-side-window)
-    (set-frame-size frame (car size) (cdr size) t)
-    (dolist (f infinite--frames)
-      (unless (eq f frame)
-        (make-frame-visible f)))))
+  (switch-to-buffer " *infinite*")
+  (delete-other-windows)
+  (dolist (f (frame-list))
+    (when (infinite-frame-p f)
+      (make-frame-visible f)))
+  (select-frame infinite--last-frame)
+  (infinite-maximized -1))
+
+(defun infinite-close-frame (event)
+  "Close currently selected frame based on EVENT.
+Removes it from the list of infinite frames."
+  (interactive "e")
+  (let ((frame (window-frame (posn-window (event-start event)))))
+    (delete-frame frame t)))
 
 (defun infinite--track-mouse (_)
   "Track mouse dragging events.
@@ -139,17 +115,18 @@ buffer."
             ('mouse-movement
              (let ((current-position (mouse-pixel-position)))
                (setq track-mouse 'dragging)
-               (dolist (f infinite--frames)
-                 (let ((p (frame-position f))
-                       (dx (- (cadr beginning-position)
-                              (cadr current-position)))
-                       (dy (- (cddr beginning-position)
-                              (cddr current-position))))
-                   (modify-frame-parameters
-                    f
-                    `((user-position . t)
-                      (left . (+ ,(- (car p) dx)))
-                      (top . (+ ,(- (cdr p) dy)))))))))
+               (dolist (f (frame-list))
+                 (when (infinite-frame-p f)
+                   (let ((p (frame-position f))
+                         (dx (- (cadr beginning-position)
+                                (cadr current-position)))
+                         (dy (- (cddr beginning-position)
+                                (cddr current-position))))
+                     (modify-frame-parameters
+                      f
+                      `((user-position . t)
+                        (left . (+ ,(- (car p) dx)))
+                        (top . (+ ,(- (cdr p) dy))))))))))
             ('mouse-1 (throw 'done nil))))))))
 
 (defun infinite--track-wheel (event)
@@ -163,24 +140,16 @@ buffer."
            ('wheel-left (cons 10 0))
            ('wheel-up (cons 0 -10))
            ('wheel-down (cons 0 10)))))
-    (dolist (f infinite--frames)
-      (let ((p (frame-position f))
-            (dx (car delta))
-            (dy (cdr delta)))
-        (modify-frame-parameters
-         f
-         `((user-position . t)
-           (left . (+ ,(- (car p) dx)))
-           (top . (+ ,(- (cdr p) dy)))))))))
-
-(defun infinite-delete-frame (event)
-  "Delete currently selected frame based on EVENT.
-Removes it from the list of infinite frames."
-  (interactive "e")
-  (let ((frame (window-frame (posn-window (event-start event)))))
-    (when (memq frame infinite--frames)
-      (setq infinite--frames (remq frame infinite--frames))
-      (handle-delete-frame `(delete-frame (,frame))))))
+    (dolist (f (frame-list))
+      (when (infinite-frame-p f)
+        (let ((p (frame-position f))
+              (dx (car delta))
+              (dy (cdr delta)))
+          (modify-frame-parameters
+           f
+           `((user-position . t)
+             (left . (+ ,(- (car p) dx)))
+             (top . (+ ,(- (cdr p) dy))))))))))
 
 (defun infinite--space-occupied-p (p1x p1y p2x p2y)
   "Check if space is already occupied by another frame.
@@ -188,16 +157,18 @@ P1X P1Y P2X P2Y are the top left and bottom right x and y
 components of a rectangle.  See `infinite--rectangle-overlap-p'
 for more info."
   (catch 'yes
-    (dolist (f infinite--frames)
-      (let* ((pos (frame-position f))
-             (p3x (car pos))
-             (p3y (cdr pos))
-             (p4x (+ p3x (frame-pixel-width f)))
-             (p4y (+ p3y (frame-pixel-height f))))
-        (when (infinite--rectangle-overlap-p
-               p1x p1y p2x p2y
-               p3x p3y p4x p4y)
-          (throw 'yes f))))))
+    (dolist (f (frame-list))
+      (when (and (infinite-frame-p f)
+                 (frame-visible-p f))
+        (let* ((pos (frame-position f))
+               (p3x (car pos))
+               (p3y (cdr pos))
+               (p4x (+ p3x (frame-pixel-width f)))
+               (p4y (+ p3y (frame-pixel-height f))))
+          (when (infinite--rectangle-overlap-p
+                 p1x p1y p2x p2y
+                 p3x p3y p4x p4y)
+            (throw 'yes f)))))))
 
 (defun infinite--rectangle-overlap-p
     ( p1x p1y p2x p2y
@@ -279,12 +250,13 @@ parameter."
                    (drag-internal-border . t)
                    (unsplittable . t)
                    (undecorated . t)
-                   (minibuffer . nil)))))
+                   (minibuffer . nil)
+                   (z-group . nil)
+                   (infinite-frame . t)))))
     (setq infinite--default-pixel-width
           (frame-pixel-width nframe)
           infinite--default-pixel-height
           (frame-pixel-height nframe))
-    (push nframe infinite--frames)
     (select-frame nframe)
     (when buffer
       (switch-to-buffer buffer norecord))
@@ -315,7 +287,6 @@ parameter."
 Don't call manually, instead use `infinite-start'."
   :keymap infinite-mode-map
   (setq infinite--base-frame (window-frame (get-buffer-window))
-        infinite--frames nil
         mode-line-format nil)
   (make-local-variable 'minor-mode-overriding-map-alist)
   (push `(pixel-scroll-precision-mode . ,infinite-mode-map)
@@ -325,6 +296,19 @@ Don't call manually, instead use `infinite-start'."
      window
      'split-window
      #'infinite--new-window)))
+
+;;;###autoload
+(define-minor-mode infinite-maximized
+  "Maximized mode for infinite frame."
+  :group 'infinite
+  :global t
+  :lighter (:propertize
+            " unmaximize"
+            help-echo "unmaximize current window"
+            pointer hand
+            local-map (keymap
+                       (mode-line keymap
+                                  (mouse-1 . infinite-unmaximize-frame)))))
 
 ;;;###autoload
 (defun infinite-start ()
@@ -345,7 +329,7 @@ displaying it the most recently selected one."
   (let ((pos (infinite--find-free-space)))
     (infinite--make-frame (car pos) (cdr pos) buffer-or-name norecord)))
 
-(defun infinite-visit-file (filename &optional wildcards)
+(defun infinite-visit-file (filename &optional wildcards &rest _)
   "Edit file FILENAME.
 Switch to a window visiting file FILENAME, creating one in the
 infinite buffer.
