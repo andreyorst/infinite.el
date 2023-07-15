@@ -5,7 +5,7 @@
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: frames mouse convenience
 ;; Prefix: infinite
-;; Version: 0.0.4
+;; Version: 0.0.5
 ;;
 ;; This program is free software: you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
@@ -36,6 +36,24 @@
   :group 'infinite
   :type 'integer
   :package-version '(infinite "0.0.3"))
+
+(defvar infinite--animation-duration 0.33)
+
+(defcustom infinite-animation-speed 100
+  "Animation speed in percent.
+Lower values slow down animation, higher values speed it up."
+  :set (lambda (_ val)
+         (setq infinite--animation-duration (/ 0.33 (/ val 100.0))))
+  :group 'infinite
+  :type 'integer
+  :package-version '(infinite "0.0.5"))
+
+(defcustom infinite-animate-transitions t
+  "Animation speed in percent.
+Lower values slow down animation, higher values speed it up."
+  :group 'infinite
+  :type 'boolean
+  :package-version '(infinite "0.0.5"))
 
 (defvar infinite--base-frame nil)
 (defvar infinite--last-frame nil)
@@ -113,15 +131,15 @@ buffer."
           (setq event (read-event))
           (pcase (event-basic-type event)
             ('mouse-movement
-             (let ((current-position (mouse-pixel-position)))
+             (let* ((current-position (mouse-pixel-position))
+                    (dx (- (cadr beginning-position)
+                           (cadr current-position)))
+                    (dy (- (cddr beginning-position)
+                           (cddr current-position))))
                (setq track-mouse 'dragging)
                (dolist (f (frame-list))
                  (when (infinite-frame-p f)
-                   (let ((p (frame-position f))
-                         (dx (- (cadr beginning-position)
-                                (cadr current-position)))
-                         (dy (- (cddr beginning-position)
-                                (cddr current-position))))
+                   (let ((p (frame-position f)))
                      (modify-frame-parameters
                       f
                       `((user-position . t)
@@ -134,22 +152,73 @@ buffer."
 Moves all visible child frames that were opened in the infinite
 buffer."
   (interactive "e")
-  (let ((delta
-         (pcase (event-basic-type event)
-           ('wheel-right (cons -10 0))
-           ('wheel-left (cons 10 0))
-           ('wheel-up (cons 0 -10))
-           ('wheel-down (cons 0 10)))))
+  (let* ((delta
+          (pcase (event-basic-type event)
+            ('wheel-right (cons -10 0))
+            ('wheel-left (cons 10 0))
+            ('wheel-up (cons 0 -10))
+            ('wheel-down (cons 0 10))))
+         (dx (car delta))
+         (dy (cdr delta)))
     (dolist (f (frame-list))
       (when (infinite-frame-p f)
-        (let ((p (frame-position f))
-              (dx (car delta))
-              (dy (cdr delta)))
+        (let ((p (frame-position f)))
           (modify-frame-parameters
            f
            `((user-position . t)
              (left . (+ ,(- (car p) dx)))
              (top . (+ ,(- (cdr p) dy))))))))))
+
+(defun infinite--lerp (start-pos end-pos time)
+  "Linearly interpolate between START-POS END-POS over TIME."
+  (cons (floor (+ (car start-pos) (* (- (car end-pos) (car start-pos)) time)))
+        (floor (+ (cdr start-pos) (* (- (cdr end-pos) (cdr start-pos)) time)))))
+
+(defun infinite--ease-out (time)
+  "Easing function of TIME."
+  (- 1 (* (- 1 time) (- 1 time))))
+
+(defun infinite--animate-transition (old-pos new-pos start-time)
+  "Animate all frames moving.
+Given a new position NEW-POS and an old position OLD-POS,
+interpolate between them while moving all visible frames, such
+that the new position is moved to the old position.
+
+This function sets up a timer to call itself on the next tick.
+START-TIME represents the original moment in time this function
+was called."
+  (let* ((time (float-time (time-subtract (current-time) start-time)))
+         (new-pos*
+          (infinite--lerp
+           old-pos
+           new-pos
+           (infinite--ease-out (/ time infinite--animation-duration))))
+         (dx (- (car new-pos*) (car old-pos)))
+         (dy (- (cdr new-pos*) (cdr old-pos))))
+    (dolist (f (frame-list))
+      (when (infinite-frame-p f)
+        (let* ((p (frame-parameter f 'infinite-original-pos)))
+          (modify-frame-parameters
+           f
+           `((user-position . t)
+             (left . (+ ,(+ (car p) dx)))
+             (top . (+ ,(+ (cdr p) dy))))))))
+    (when (< time infinite--animation-duration)
+      (run-at-time
+       0.01 nil
+       #'infinite--animate-transition
+       old-pos
+       new-pos
+       start-time))))
+
+(defun infinite--animate-new-frame (old-pos new-pos)
+  "Animate the apperance of a new frame.
+Moves view from OLD-POS to a NEW-POS."
+  (when infinite-animate-transitions
+    (dolist (f (frame-list))
+      (when (infinite-frame-p f)
+        (set-frame-parameter f 'infinite-original-pos (frame-position f))))
+    (infinite--animate-transition old-pos new-pos (current-time))))
 
 (defun infinite--space-occupied-p (p1x p1y p2x p2y)
   "Check if space is already occupied by another frame.
@@ -198,8 +267,8 @@ corner."
       (setq f frame direction 'right)
       (while t
         (let* ((pos (and f (frame-position f)))
-               (x (or (car pos) infinite-gap))
-               (y (or (cdr pos) infinite-gap))
+               (x (or (car pos) (- (/ (window-pixel-width) 2) (/ infinite--default-pixel-width 2))))
+               (y (or (cdr pos) (- (/ (window-pixel-height) 2) (/ infinite--default-pixel-height 2))))
                (pos (pcase direction
                       ('right
                        (cons (+ x (if f (frame-pixel-width f) 0) infinite-gap) y))
@@ -226,9 +295,13 @@ corner."
 
 (defun infinite--open-side-window (window &rest _)
   "Open a new window to the side of the given WINDOW."
-  (let* ((new-pos (infinite--find-free-space (window-frame window))))
-    (frame-selected-window
-     (infinite--make-frame (car new-pos) (cdr new-pos)))))
+  (let* ((frame (window-frame window))
+         (new-pos (infinite--find-free-space (window-frame window)))
+         (window (frame-selected-window
+                  (infinite--make-frame (car new-pos) (cdr new-pos)))))
+    (infinite--animate-new-frame
+     new-pos (frame-position frame))
+    window))
 
 (defun infinite--new-window (&rest _)
   "Open a new window."
@@ -248,10 +321,8 @@ parameter."
                    (child-frame-border-width . 2)
                    (drag-with-header-line . t)
                    (drag-internal-border . t)
-                   (unsplittable . t)
                    (undecorated . t)
                    (minibuffer . nil)
-                   (z-group . nil)
                    (infinite-frame . t)))))
     (setq infinite--default-pixel-width
           (frame-pixel-width nframe)
@@ -317,7 +388,8 @@ Don't call manually, instead use `infinite-start'."
   (delete-other-windows)
   (switch-to-buffer " *infinite*")
   (read-only-mode)
-  (infinite-mode))
+  (infinite-mode)
+  (delete-frame (infinite--make-frame -1000 -1000)))
 
 (defun infinite-open-buffer (buffer-or-name &optional norecord _)
   "Display buffer BUFFER-OR-NAME in the new window.
