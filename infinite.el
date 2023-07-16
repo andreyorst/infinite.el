@@ -5,7 +5,7 @@
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: frames mouse convenience
 ;; Prefix: infinite
-;; Version: 0.0.7
+;; Version: 0.0.8
 ;;
 ;; This program is free software: you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
@@ -61,25 +61,25 @@ Lower values slow down animation, higher values speed it up."
 (defvar infinite--default-pixel-height 720)
 
 (defvar infinite--header-line-format
-  (concat (propertize " " 'face '(:background "gainsboro"))
+  (concat " "
           (propertize
-           "x"
-           'face '(:foreground "red" :background "gainsboro")
+           " x "
+           'face '(:foreground unspecified :background "red")
            'pointer 'hand
            'help-echo "close window"
            'local-map (let ((map (make-sparse-keymap)))
                         (define-key map [header-line mouse-1] 'infinite-close-frame)
                         map))
-          (propertize " " 'face '(:background "gainsboro"))
+          " "
           (propertize
-           "^"
-           'face '(:foreground "green" :background "gainsboro")
+           " ^ "
+           'face '(:foreground unspecified :background "green")
            'pointer 'hand
            'help-echo "maximize window"
            'local-map (let ((map (make-sparse-keymap)))
                         (define-key map [header-line mouse-1] #'infinite-maximize-frame)
                         map))
-          (propertize " " 'face '(:background "gainsboro"))
+          " "
           " %b"))
 
 (defun infinite-frame-p (frame)
@@ -120,9 +120,13 @@ Removes it from the list of infinite frames."
     (when (frame-live-p parent)
       (infinite--animate-focus-transition
        (frame-position parent) (frame-position frame)))
-    (delete-frame frame t)))
+    (delete-frame frame t)
+    (when (frame-live-p parent)
+      (select-frame parent))))
 
 (defun infinite--pan-desktop (dx dy &optional pos-function)
+  "Move all frames according to DX and DY pixel deltas.
+Optional argument POS-FUNCTION extracts position of each frame."
   (dolist (f (frame-list))
     (when (infinite-frame-p f)
       (let ((p (if (functionp pos-function)
@@ -181,6 +185,8 @@ buffer."
   (- 1 (* (- 1 time) (- 1 time))))
 
 (defun infinite--original-pos (frame)
+  "Return original position of the FRAME.
+Used for animation only."
   (frame-parameter frame 'infinite-original-pos))
 
 (defun infinite--animate-transition (old-pos new-pos start-time)
@@ -207,6 +213,31 @@ was called."
        #'infinite--animate-transition
        old-pos new-pos start-time))))
 
+(defun infinite--clamp (low x &optional hi)
+  "Clamp X between LOW and HI boundaries."
+  (min (max low x)
+       (or hi most-positive-fixnum)))
+
+(defun infinite--clamp-pos (pos)
+  "Clamp given position POS between screen boundaries.
+Respects default frame widht and height and the gap setting."
+  (let* ((window (frame-root-window infinite--base-frame))
+         (width (window-pixel-width window))
+         (height (window-pixel-height window)))
+    (cons
+     (infinite--clamp
+      infinite-gap
+      (car pos)
+      (infinite--clamp
+       infinite-gap
+       (- width infinite--default-pixel-width infinite-gap)))
+     (infinite--clamp
+      infinite-gap
+      (cdr pos)
+      (infinite--clamp
+       infinite-gap
+       (- height infinite--default-pixel-height infinite-gap))))))
+
 (defun infinite--animate-focus-transition (old-pos new-pos)
   "Animate the apperance of a new frame.
 Moves view from OLD-POS to a NEW-POS."
@@ -214,7 +245,7 @@ Moves view from OLD-POS to a NEW-POS."
     (dolist (f (frame-list))
       (when (infinite-frame-p f)
         (set-frame-parameter f 'infinite-original-pos (frame-position f))))
-    (infinite--animate-transition old-pos new-pos (current-time))))
+    (infinite--animate-transition old-pos (infinite--clamp-pos new-pos) (current-time))))
 
 (defun infinite--space-occupied-p (p1x p1y p2x p2y)
   "Check if space is already occupied by another frame.
@@ -265,7 +296,9 @@ P3Y P4X P4Y are the same for the second rectangle.
 (defun infinite--find-free-space (&optional direction frame)
   "Find nearest free space for a given FRAME.
 If FRAME is not provided starts the search from the top left
-corner."
+corner.  DIRECTION corresponds to initial search direction, but
+doesn't ultimatively mean that the space will be in that
+direction."
   (catch 'pos
     (let (f dir)
       (setq f frame dir (or direction 'right))
@@ -299,7 +332,7 @@ corner."
           (setq f colliding-frame))))))
 
 (defun infinite--open-side-window (window _ side)
-  "Open a new window to the side of the given WINDOW."
+  "Open a new window to the SIDE of the given WINDOW."
   (let* ((frame (window-frame window))
          (new-pos (infinite--find-free-space side (window-frame window)))
          (window (frame-selected-window
@@ -320,9 +353,10 @@ corner."
 
 (defun infinite--make-frame (pos &optional parent buffer norecord _)
   "Make frame that obeys infinite rules.
-Frame is positioned at X Y coordinates, and may optionally
-contain a given BUFFER with the respect to the NORECORD
-parameter."
+Frame is positioned at POS, and may optionally contain a given
+BUFFER with the respect to the NORECORD parameter.  PARENT is not
+used to specify the `parent-frame' parameter, but to indicate the
+parent frame to focuse when the frame is killed."
   (let ((nframe (make-frame
                  `((left . ,(car pos)) (top . ,(cdr pos))
                    (width . 80) (height . 42)
