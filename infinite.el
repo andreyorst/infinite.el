@@ -5,7 +5,7 @@
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: frames mouse convenience
 ;; Prefix: infinite
-;; Version: 0.0.6
+;; Version: 0.0.7
 ;;
 ;; This program is free software: you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
@@ -61,25 +61,25 @@ Lower values slow down animation, higher values speed it up."
 (defvar infinite--default-pixel-height 720)
 
 (defvar infinite--header-line-format
-  (concat (propertize " " 'face '(:background "gray50"))
+  (concat (propertize " " 'face '(:background "gainsboro"))
           (propertize
            "x"
-           'face '(:foreground "red" :background "gray50")
+           'face '(:foreground "red" :background "gainsboro")
            'pointer 'hand
            'help-echo "close window"
            'local-map (let ((map (make-sparse-keymap)))
                         (define-key map [header-line mouse-1] 'infinite-close-frame)
                         map))
-          (propertize " " 'face '(:background "gray50"))
+          (propertize " " 'face '(:background "gainsboro"))
           (propertize
            "^"
-           'face '(:foreground "green" :background "gray50")
+           'face '(:foreground "green" :background "gainsboro")
            'pointer 'hand
            'help-echo "maximize window"
            'local-map (let ((map (make-sparse-keymap)))
                         (define-key map [header-line mouse-1] #'infinite-maximize-frame)
                         map))
-          (propertize " " 'face '(:background "gray50"))
+          (propertize " " 'face '(:background "gainsboro"))
           " %b"))
 
 (defun infinite-frame-p (frame)
@@ -117,8 +117,9 @@ Removes it from the list of infinite frames."
   (interactive "e")
   (let* ((frame (window-frame (posn-window (event-start event))))
          (parent (frame-parameter frame 'infinite-parent)))
-    (infinite--animate-focus-transition
-     (frame-position parent) (frame-position frame))
+    (when (frame-live-p parent)
+      (infinite--animate-focus-transition
+       (frame-position parent) (frame-position frame)))
     (delete-frame frame t)))
 
 (defun infinite--pan-desktop (dx dy &optional pos-function)
@@ -253,6 +254,14 @@ P3Y P4X P4Y are the same for the second rectangle.
                     P4"
   (not (or (< p2y p3y) (> p1y p4y) (< p2x p3x) (> p1x p4x))))
 
+(defun infinite--screen-center-pos ()
+  "Return a position on the screen that will center a new frame."
+  (let ((window (frame-root-window infinite--base-frame)))
+    (cons (- (/ (window-pixel-width window) 2)
+             (/ infinite--default-pixel-width 2))
+          (- (/ (window-pixel-height window) 2)
+             (/ infinite--default-pixel-height 2)))))
+
 (defun infinite--find-free-space (&optional direction frame)
   "Find nearest free space for a given FRAME.
 If FRAME is not provided starts the search from the top left
@@ -261,9 +270,10 @@ corner."
     (let (f dir)
       (setq f frame dir (or direction 'right))
       (while t
-        (let* ((pos (and f (frame-position f)))
-               (x (or (car pos) (- (/ (window-pixel-width) 2) (/ infinite--default-pixel-width 2))))
-               (y (or (cdr pos) (- (/ (window-pixel-height) 2) (/ infinite--default-pixel-height 2))))
+        (let* ((pos (if f (frame-position f)
+                      (infinite--screen-center-pos)))
+               (x (car pos))
+               (y (cdr pos))
                (pos (pcase dir
                       ('right
                        (cons (+ x (if f (frame-pixel-width f) 0) infinite-gap) y))
@@ -293,24 +303,28 @@ corner."
   (let* ((frame (window-frame window))
          (new-pos (infinite--find-free-space side (window-frame window)))
          (window (frame-selected-window
-                  (infinite--make-frame (car new-pos) (cdr new-pos) frame))))
+                  (infinite--make-frame new-pos frame))))
     (infinite--animate-focus-transition
      new-pos (frame-position frame))
     window))
 
 (defun infinite--new-window (&rest _)
   "Open a new window."
-  (let* ((new-pos (infinite--find-free-space)))
-    (frame-selected-window
-     (infinite--make-frame (car new-pos) (cdr new-pos)))))
+  (let* ((new-pos (infinite--find-free-space))
+         (center-pos (infinite--screen-center-pos))
+         (frame (infinite--make-frame new-pos)))
+    (infinite--animate-focus-transition
+     new-pos
+     center-pos)
+    (frame-selected-window frame)))
 
-(defun infinite--make-frame (x y &optional parent buffer norecord _)
+(defun infinite--make-frame (pos &optional parent buffer norecord _)
   "Make frame that obeys infinite rules.
 Frame is positioned at X Y coordinates, and may optionally
 contain a given BUFFER with the respect to the NORECORD
 parameter."
   (let ((nframe (make-frame
-                 `((left . ,x) (top . ,y)
+                 `((left . ,(car pos)) (top . ,(cdr pos))
                    (width . 80) (height . 42)
                    (parent-frame . ,infinite--base-frame)
                    (infinite-parent . ,parent)
@@ -385,7 +399,9 @@ Don't call manually, instead use `infinite-start'."
   (switch-to-buffer " *infinite*")
   (read-only-mode)
   (infinite-mode)
-  (delete-frame (infinite--make-frame -1000 -1000)))
+  (delete-frame (infinite--make-frame (cons -1000 -1000)))
+  (setq split-height-threshold nil)
+  (setq split-width-threshold 0))
 
 (defun infinite-open-buffer (buffer-or-name &optional norecord _)
   "Display buffer BUFFER-OR-NAME in the new window.
@@ -394,8 +410,10 @@ If optional argument NORECORD is non-nil, do not put the buffer
 at the front of the buffer list, and do not make the window
 displaying it the most recently selected one."
   (interactive "B")
-  (let ((pos (infinite--find-free-space)))
-    (infinite--make-frame (car pos) (cdr pos) nil buffer-or-name norecord)))
+  (let ((center-pos (infinite--screen-center-pos))
+        (pos (infinite--find-free-space)))
+    (infinite--make-frame pos nil buffer-or-name norecord)
+    (infinite--animate-focus-transition pos center-pos)))
 
 (defun infinite-visit-file (filename &optional wildcards &rest _)
   "Edit file FILENAME.
@@ -409,10 +427,17 @@ suppress wildcard expansion by setting ‘find-file-wildcards’ to nil."
    (find-file-read-args "Find file: "
                         (confirm-nonexistent-file-or-buffer)))
   (let* ((value (find-file-noselect filename nil nil wildcards))
-         (values (if (listp value) value (list value))))
+         (values (if (listp value) value (list value)))
+         last-pos)
     (dolist (value values)
       (let ((pos (infinite--find-free-space)))
-        (infinite--make-frame (car pos) (cdr pos) nil value)))))
+        (setq last-pos pos)
+        (infinite--make-frame pos nil value)))
+    (message "%S %S" last-pos
+     (infinite--screen-center-pos))
+    (infinite--animate-focus-transition
+     last-pos
+     (infinite--screen-center-pos))))
 
 (provide 'infinite)
 ;;; infinite.el ends here
