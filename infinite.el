@@ -5,7 +5,7 @@
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: frames mouse convenience
 ;; Prefix: infinite
-;; Version: 0.0.5
+;; Version: 0.0.6
 ;;
 ;; This program is free software: you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
@@ -115,8 +115,23 @@ Lower values slow down animation, higher values speed it up."
   "Close currently selected frame based on EVENT.
 Removes it from the list of infinite frames."
   (interactive "e")
-  (let ((frame (window-frame (posn-window (event-start event)))))
+  (let* ((frame (window-frame (posn-window (event-start event))))
+         (parent (frame-parameter frame 'infinite-parent)))
+    (infinite--animate-focus-transition
+     (frame-position parent) (frame-position frame))
     (delete-frame frame t)))
+
+(defun infinite--pan-desktop (dx dy &optional pos-function)
+  (dolist (f (frame-list))
+    (when (infinite-frame-p f)
+      (let ((p (if (functionp pos-function)
+                   (funcall pos-function f)
+                 (frame-position f))))
+        (modify-frame-parameters
+         f
+         `((user-position . t)
+           (left . (+ ,(- (car p) dx)))
+           (top . (+ ,(- (cdr p) dy)))))))))
 
 (defun infinite--track-mouse (_)
   "Track mouse dragging events.
@@ -137,14 +152,7 @@ buffer."
                     (dy (- (cddr beginning-position)
                            (cddr current-position))))
                (setq track-mouse 'dragging)
-               (dolist (f (frame-list))
-                 (when (infinite-frame-p f)
-                   (let ((p (frame-position f)))
-                     (modify-frame-parameters
-                      f
-                      `((user-position . t)
-                        (left . (+ ,(- (car p) dx)))
-                        (top . (+ ,(- (cdr p) dy))))))))))
+               (infinite--pan-desktop dx dy)))
             ('mouse-1 (throw 'done nil))))))))
 
 (defun infinite--track-wheel (event)
@@ -160,14 +168,7 @@ buffer."
             ('wheel-down (cons 0 10))))
          (dx (car delta))
          (dy (cdr delta)))
-    (dolist (f (frame-list))
-      (when (infinite-frame-p f)
-        (let ((p (frame-position f)))
-          (modify-frame-parameters
-           f
-           `((user-position . t)
-             (left . (+ ,(- (car p) dx)))
-             (top . (+ ,(- (cdr p) dy))))))))))
+    (infinite--pan-desktop dx dy)))
 
 (defun infinite--lerp (start-pos end-pos time)
   "Linearly interpolate between START-POS END-POS over TIME."
@@ -177,6 +178,9 @@ buffer."
 (defun infinite--ease-out (time)
   "Easing function of TIME."
   (- 1 (* (- 1 time) (- 1 time))))
+
+(defun infinite--original-pos (frame)
+  (frame-parameter frame 'infinite-original-pos))
 
 (defun infinite--animate-transition (old-pos new-pos start-time)
   "Animate all frames moving.
@@ -188,30 +192,21 @@ This function sets up a timer to call itself on the next tick.
 START-TIME represents the original moment in time this function
 was called."
   (let* ((time (float-time (time-subtract (current-time) start-time)))
-         (new-pos*
-          (infinite--lerp
-           old-pos
-           new-pos
-           (infinite--ease-out (/ time infinite--animation-duration))))
-         (dx (- (car new-pos*) (car old-pos)))
-         (dy (- (cdr new-pos*) (cdr old-pos))))
-    (dolist (f (frame-list))
-      (when (infinite-frame-p f)
-        (let* ((p (frame-parameter f 'infinite-original-pos)))
-          (modify-frame-parameters
-           f
-           `((user-position . t)
-             (left . (+ ,(+ (car p) dx)))
-             (top . (+ ,(+ (cdr p) dy))))))))
+         (new-pos* (infinite--lerp
+                    old-pos
+                    new-pos
+                    (infinite--ease-out
+                     (/ time infinite--animation-duration))))
+         (dx (- (car old-pos) (car new-pos*)))
+         (dy (- (cdr old-pos) (cdr new-pos*))))
+    (infinite--pan-desktop dx dy #'infinite--original-pos)
     (when (< time infinite--animation-duration)
       (run-at-time
        0.01 nil
        #'infinite--animate-transition
-       old-pos
-       new-pos
-       start-time))))
+       old-pos new-pos start-time))))
 
-(defun infinite--animate-new-frame (old-pos new-pos)
+(defun infinite--animate-focus-transition (old-pos new-pos)
   "Animate the apperance of a new frame.
 Moves view from OLD-POS to a NEW-POS."
   (when infinite-animate-transitions
@@ -258,18 +253,18 @@ P3Y P4X P4Y are the same for the second rectangle.
                     P4"
   (not (or (< p2y p3y) (> p1y p4y) (< p2x p3x) (> p1x p4x))))
 
-(defun infinite--find-free-space (&optional frame)
+(defun infinite--find-free-space (&optional direction frame)
   "Find nearest free space for a given FRAME.
 If FRAME is not provided starts the search from the top left
 corner."
   (catch 'pos
-    (let (f direction)
-      (setq f frame direction 'right)
+    (let (f dir)
+      (setq f frame dir (or direction 'right))
       (while t
         (let* ((pos (and f (frame-position f)))
                (x (or (car pos) (- (/ (window-pixel-width) 2) (/ infinite--default-pixel-width 2))))
                (y (or (cdr pos) (- (/ (window-pixel-height) 2) (/ infinite--default-pixel-height 2))))
-               (pos (pcase direction
+               (pos (pcase dir
                       ('right
                        (cons (+ x (if f (frame-pixel-width f) 0) infinite-gap) y))
                       ('left
@@ -284,22 +279,22 @@ corner."
                  (+ (car pos) infinite--default-pixel-width)
                  (+ (cdr pos) infinite--default-pixel-height))))
           (when (null colliding-frame) (throw 'pos pos))
-          (setq direction
+          (setq dir
                 (if (null f) 'right
-                  (pcase direction
+                  (pcase dir
                     ('right 'below)
                     ('below 'left)
                     ('left 'below)
                     ('above 'right))))
           (setq f colliding-frame))))))
 
-(defun infinite--open-side-window (window &rest _)
+(defun infinite--open-side-window (window _ side)
   "Open a new window to the side of the given WINDOW."
   (let* ((frame (window-frame window))
-         (new-pos (infinite--find-free-space (window-frame window)))
+         (new-pos (infinite--find-free-space side (window-frame window)))
          (window (frame-selected-window
-                  (infinite--make-frame (car new-pos) (cdr new-pos)))))
-    (infinite--animate-new-frame
+                  (infinite--make-frame (car new-pos) (cdr new-pos) frame))))
+    (infinite--animate-focus-transition
      new-pos (frame-position frame))
     window))
 
@@ -309,7 +304,7 @@ corner."
     (frame-selected-window
      (infinite--make-frame (car new-pos) (cdr new-pos)))))
 
-(defun infinite--make-frame (x y &optional buffer norecord _)
+(defun infinite--make-frame (x y &optional parent buffer norecord _)
   "Make frame that obeys infinite rules.
 Frame is positioned at X Y coordinates, and may optionally
 contain a given BUFFER with the respect to the NORECORD
@@ -318,6 +313,7 @@ parameter."
                  `((left . ,x) (top . ,y)
                    (width . 80) (height . 42)
                    (parent-frame . ,infinite--base-frame)
+                   (infinite-parent . ,parent)
                    (child-frame-border-width . 2)
                    (drag-with-header-line . t)
                    (drag-internal-border . t)
@@ -399,7 +395,7 @@ at the front of the buffer list, and do not make the window
 displaying it the most recently selected one."
   (interactive "B")
   (let ((pos (infinite--find-free-space)))
-    (infinite--make-frame (car pos) (cdr pos) buffer-or-name norecord)))
+    (infinite--make-frame (car pos) (cdr pos) nil buffer-or-name norecord)))
 
 (defun infinite-visit-file (filename &optional wildcards &rest _)
   "Edit file FILENAME.
@@ -416,7 +412,7 @@ suppress wildcard expansion by setting ‘find-file-wildcards’ to nil."
          (values (if (listp value) value (list value))))
     (dolist (value values)
       (let ((pos (infinite--find-free-space)))
-        (infinite--make-frame (car pos) (cdr pos) value)))))
+        (infinite--make-frame (car pos) (cdr pos) nil value)))))
 
 (provide 'infinite)
 ;;; infinite.el ends here
